@@ -1,0 +1,114 @@
+{
+  "astronauts": {
+    "image_path": "astronauts.jpg",
+    "image_size": [
+      481,
+      321
+    ],
+    "bounding_boxes": [
+      {
+        "x1": 393.0,
+        "y1": 189.0,
+        "x2": 440.0,
+        "y2": 217.0,
+        "label": "target"
+      }
+    ]
+  },
+  "bell_pepper": {
+    "image_path": "bell_pepper.jpg",
+    "image_size": [
+      321,
+      481
+    ],
+    "bounding_boxes": [
+      {
+        "x1": 43.0,
+        "y1": 205.0,
+        "x2": 94.0,
+        "y2": 254.0,
+        "label": "target"
+      }
+    ]
+  },
+  "headdress": {
+    "image_path": "headdress.jpg",
+    "image_size": [
+      481,
+      321
+    ],
+    "bounding_boxes": [
+      {
+        "x1": 71.0,
+        "y1": 1.0,
+        "x2": 120.0,
+        "y2": 43.0,
+        "label": "target"
+      }
+    ]
+  },
+  "hut": {
+    "image_path": "hut.jpg",
+    "image_size": [
+      321,
+      481
+    ],
+    "bounding_boxes": [
+      {
+        "x1": 134.0,
+        "y1": 267.0,
+        "x2": 150.0,
+        "y2": 287.0,
+        "label": "target"
+      }
+    ]
+  },
+  "ladybug": {
+    "image_path": "ladybug.jpg",
+    "image_size": [
+      481,
+      321
+    ],
+    "bounding_boxes": [
+      {
+        "x1": 119.0,
+        "y1": 127.0,
+        "x2": 215.0,
+        "y2": 209.0,
+        "label": "target"
+      }
+    ]
+  },
+  "monkey": {
+    "image_path": "monkey.jpg",
+    "image_size": [
+      481,
+      321
+    ],
+    "bounding_boxes": [
+      {
+        "x1": 97.0,
+        "y1": 48.0,
+        "x2": 203.0,
+        "y2": 173.0,
+        "label": "target"
+      }
+    ]
+  },
+  "workers": {
+    "image_path": "workers.jpg",
+    "image_size": [
+      481,
+      321
+    ],
+    "bounding_boxes": [
+      {
+        "x1": 37.0,
+        "y1": 45.0,
+        "x2": 160.0,
+        "y2": 116.0,
+        "label": "target"
+      }
+    ]
+  }
+}
