@@ -21,7 +21,7 @@ The model implements a biologically-inspired visual search system that uses:
 
 1. Clone the repository:
 ```bash
-git clone <repository-url>
+git clone https://github.com/julianZeitler/iconic-visual-search
 cd iconic-visual-search
 ```
 
