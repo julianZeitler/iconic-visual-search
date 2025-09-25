@@ -61,7 +61,6 @@ def process_all_images():
 
         # Perform visual search
         fixations = model.visual_search(image)
-        
 
         # Calculate performance metrics
         final_fixation = fixations[-1]
@@ -153,41 +152,8 @@ def create_summary_plots(results):
     plt.suptitle('Visual Search Results for All Images', y=0.98, fontsize=16)
     plt.show()
 
-    # Create performance summary
-    plt.figure(figsize=(12, 6))
-
-    # Distance to target plot
-    plt.subplot(1, 2, 1)
     distances = [r['final_distance'] for r in results]
     image_names = [r['image_name'] for r in results]
-
-    bars = plt.bar(range(len(distances)), distances)
-    plt.xlabel('Image')
-    plt.ylabel('Final Distance to Target (pixels)')
-    plt.title('Search Accuracy by Image')
-    plt.xticks(range(len(image_names)), image_names, rotation=45)
-
-    # Color bars by performance (green=good, red=poor)
-    max_dist = max(distances) if distances else 1
-    for i, bar in enumerate(bars):
-        ratio = distances[i] / max_dist
-        bar.set_color(plt.cm.RdYlGn_r(ratio))
-
-    plt.grid(True, alpha=0.3)
-
-    # Fixation count plot
-    plt.subplot(1, 2, 2)
-    fixation_counts = [len(r['fixations']) for r in results]
-
-    plt.bar(range(len(fixation_counts)), fixation_counts, color='steelblue')
-    plt.xlabel('Image')
-    plt.ylabel('Number of Fixations')
-    plt.title('Fixation Count by Image')
-    plt.xticks(range(len(image_names)), image_names, rotation=45)
-    plt.grid(True, alpha=0.3)
-
-    plt.tight_layout()
-    plt.show()
 
     # Print summary statistics
     print("\n" + "="*50)
@@ -198,7 +164,6 @@ def create_summary_plots(results):
     print(f"Median final distance: {np.median(distances):.1f} pixels")
     print(f"Best performance: {min(distances):.1f} pixels ({image_names[distances.index(min(distances))]})")
     print(f"Worst performance: {max(distances):.1f} pixels ({image_names[distances.index(max(distances))]})")
-    print(f"Average fixations: {np.mean(fixation_counts):.1f}")
 
 
 def process_single_image(image_name: str, show_filters: bool = False, show_saliency: bool = False):

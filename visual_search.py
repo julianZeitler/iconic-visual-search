@@ -10,12 +10,12 @@ class VisualSearchModel:
     Uses coarse-to-fine strategy with weighted population averaging.
     """
 
-    def __init__(self, scales: List[float] = [4.0, 2.0, 1.0, 0.5]):
+    def __init__(self, scales: List[float] = [2.0, 1.0, 0.5]):
         self.scales = scales
         self.filter_bank = SpatioChromaticFilters()
         self.target_template = None
         self.target_bbox = None
-        self.temperature_schedule = [1.0, 0.5, 0.1, 0.01]
+        self.temperature_schedule = [1.0, 0.1, 0.01]
 
     def memorize_target(self, target_image: np.ndarray, bbox: dict):
         """
@@ -52,7 +52,7 @@ class VisualSearchModel:
         """
         Compute saliency map using scales from coarsest to current_scale_level.
         As described in the paper: start with coarsest scale, progressively add finer scales.
-        current_scale_level: 0=first fixation (coarsest only), 3=final fixation (all scales)
+        current_scale_level: 0=first fixation (coarsest only), 2=final fixation (all scales)
         scene_responses: Pre-computed filter responses for the entire image
         """
         if self.target_template is None:
@@ -63,8 +63,7 @@ class VisualSearchModel:
         # Use scales from coarsest (0) up to and including current_scale_level
         # Fixation 1: scales [0] (coarsest only)
         # Fixation 2: scales [0, 1] (coarsest + next)
-        # Fixation 3: scales [0, 1, 2] (coarsest + two next)
-        # Fixation 4: scales [0, 1, 2, 3] (all scales)
+        # Fixation 3: scales [0, 1, 2] (all scales)
         num_filters = len(self.filter_bank.filters)
 
         saliency_map = np.zeros((height, width))

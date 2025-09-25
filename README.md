@@ -12,15 +12,15 @@ This implementation is based on the following paper:
 
 The model implements a biologically-inspired visual search system that uses:
 - **Steerable filters** based on Gaussian derivatives (up to 3rd order)
-- **Multi-scale processing** with 4 spatial scales (4.0x, 2.0x, 1.0x, 0.5x)
-- **Coarse-to-fine search strategy** with 4 fixations
+- **Multi-scale processing** with 3 spatial scales (2.0x, 1.0x, 0.5x)
+- **Coarse-to-fine search strategy** with 3 fixations
 - **Weighted population averaging** for attention guidance
 - **Template matching** using iconic feature representations
 
 ## Key Features
 
 - **10 basis filters**: G0 (Gaussian), G1 (1st derivatives), G2 (2nd derivatives), G3 (3rd derivatives)
-- **Multi-scale analysis**: Processes features at 4 different spatial resolutions
+- **Multi-scale analysis**: Processes features at 3 different spatial resolutions
 - **Progressive search**: From broad global search to precise target localization
 - **Filter visualization**: Detailed analysis of filter responses and target matching
 - **Performance evaluation**: Distance metrics and search accuracy analysis
@@ -115,20 +115,19 @@ iconic-visual-search/
 
 ### 1. Spatio-Chromatic Filters (`SpatioChromaticFilters`)
 - **Filter bank**: 10 steerable filters based on Gaussian derivatives
-- **Multi-scale**: Applies filters at 4 different spatial scales
+- **Multi-scale**: Applies filters at 3 different spatial scales
 - **Feature extraction**: Creates iconic representation of image patches
 
 ### 2. Visual Search Model (`VisualSearchModel`)
 - **Target memorization**: Stores template from target location
 - **Saliency computation**: Computes similarity maps using filter responses
-- **Coarse-to-fine search**: 4 fixations with decreasing temperature
+- **Coarse-to-fine search**: 3 fixations with decreasing temperature
 - **Attention guidance**: Weighted population averaging for fixation selection
 
 ### 3. Search Process
-1. **Fixation 1**: Very coarse scale (4.0x), high temperature (1.0) - global search
-2. **Fixation 2**: Coarse scale (2.0x), medium temperature (0.5) - regional focus
-3. **Fixation 3**: Medium scale (1.0x), low temperature (0.1) - local search
-4. **Fixation 4**: Fine scale (0.5x), very low temperature (0.01) - precise localization
+2. **Fixation 1**: Coarse scale (2.0x), medium temperature (1) - regional focus
+3. **Fixation 2**: Medium scale (1.0x), low temperature (0.1) - local search
+4. **Fixation 3**: Fine scale (0.5x), very low temperature (0.01) - precise localization
 
 ## Visualizations
 
@@ -143,7 +142,7 @@ iconic-visual-search/
 - **Performance metrics**: Distance calculations and search accuracy
 
 ### Saliency Maps Mode (--saliency)
-- **Consecutive saliency maps**: Shows saliency evolution across all 4 spatial scales
+- **Consecutive saliency maps**: Shows saliency evolution across all 3 spatial scales
 - **Scale progression**: Visualization of coarse-to-fine search strategy
 - **Fixation overlay**: Original image with corresponding fixation points for each scale
 
@@ -167,7 +166,7 @@ The model performs a coarse-to-fine visual search on the ladybug image, showing 
 
 ![Ladybug Saliency Maps](results/ladybug_saliency.png)
 
-This visualization shows how the saliency maps evolve across different spatial scales (4.0x, 2.0x, 1.0x, 0.5x) during the coarse-to-fine search process. Bright areas indicate regions with high similarity to the target template. The bottom row shows the original image with the corresponding fixation point for each scale.
+This visualization shows how the saliency maps evolve across different spatial scales (2.0x, 1.0x, 0.5x) during the coarse-to-fine search process. Bright areas indicate regions with high similarity to the target template. The bottom row shows the original image with the corresponding fixation point for each scale.
 
 ## Technical Details
 
