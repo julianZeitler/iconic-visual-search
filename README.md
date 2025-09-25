@@ -17,14 +17,6 @@ The model implements a biologically-inspired visual search system that uses:
 - **Weighted population averaging** for attention guidance
 - **Template matching** using iconic feature representations
 
-## Key Features
-
-- **10 basis filters**: G0 (Gaussian), G1 (1st derivatives), G2 (2nd derivatives), G3 (3rd derivatives)
-- **Multi-scale analysis**: Processes features at 3 different spatial resolutions
-- **Progressive search**: From broad global search to precise target localization
-- **Filter visualization**: Detailed analysis of filter responses and target matching
-- **Performance evaluation**: Distance metrics and search accuracy analysis
-
 ## Installation
 
 1. Clone the repository:
@@ -152,7 +144,6 @@ When processing the test images, the model demonstrates:
 - **Center-of-gravity effects** in early fixations
 - **Progressive convergence** toward target locations
 - **Scale-dependent processing** from global to local features
-- **Biological plausibility** matching human eye movement patterns
 
 ### Visual Search Results
 
@@ -167,20 +158,6 @@ The model performs a coarse-to-fine visual search on the ladybug image, showing 
 ![Ladybug Saliency Maps](results/ladybug_saliency.png)
 
 This visualization shows how the saliency maps evolve across different spatial scales (2.0x, 1.0x, 0.5x) during the coarse-to-fine search process. Bright areas indicate regions with high similarity to the target template. The bottom row shows the original image with the corresponding fixation point for each scale.
-
-## Technical Details
-
-### Filter Implementation
-- **Gaussian derivatives**: Computed analytically up to 3rd order
-- **Steerable filters**: Basis functions for arbitrary orientation selectivity
-- **Multi-scale processing**: Filter size scales with spatial resolution
-- **Normalization**: Filters normalized to unit sum of absolute values
-
-### Search Algorithm
-- **Template matching**: Euclidean distance in filter response space
-- **Saliency inversion**: Lower distance = higher saliency
-- **Weighted averaging**: Softmax-like weighting with temperature control
-- **Numerical stability**: Overflow protection and fallback mechanisms
 
 ## Dependencies
 
@@ -211,7 +188,3 @@ If you use this implementation in your research, please cite the original paper:
 ## License
 
 MIT License - see the LICENSE file for details.
-
-## Contributing
-
-Contributions are welcome! Please feel free to submit issues, feature requests, or pull requests.
