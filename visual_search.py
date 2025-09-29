@@ -1,7 +1,8 @@
 import numpy as np
+import torch
 import matplotlib.pyplot as plt
 from typing import List, Tuple, Optional
-from spatio_chromatic_filters import SpatioChromaticFilters
+from gist.layers.gabor_filter_bank import GaborFilterbank
 
 
 class VisualSearchModel:
@@ -10,12 +11,62 @@ class VisualSearchModel:
     Uses coarse-to-fine strategy with weighted population averaging.
     """
 
-    def __init__(self, scales: List[float] = [2.0, 1.0, 0.5]):
+    def __init__(self, scales: List[float] = [2.0, 1.0, 0.5], device: str = "cuda" if torch.cuda.is_available() else "cpu"):
         self.scales = scales
-        self.filter_bank = SpatioChromaticFilters()
+        self.device = torch.device(device)
+        self.filter_bank = GaborFilterbank(
+            in_channels=1,
+            mode="static",
+            bandwidth=0.1,
+            theta=np.pi/5,
+            n_scales=3,
+            n_orientations=8,
+            n_phases=2,
+            fmax=0.3,
+            scale=5,
+            gaussian=True,
+            gaussian_inverse=False,
+            n_stds=3,
+            dc_compensate=True,
+            stride=1,
+            energy=True,
+            energy_mode="substitute"
+        ).to(self.device)
         self.target_template = None
         self.target_bbox = None
-        self.temperature_schedule = [1.0, 0.1, 0.01]
+        self.temperature_schedule = [0.01, 0.005, 0.001]
+
+    def _image_to_tensor(self, image: np.ndarray) -> torch.Tensor:
+        """Convert numpy image to PyTorch tensor with proper shape and normalization."""
+        if len(image.shape) == 2:
+            # Grayscale image
+            tensor = torch.from_numpy(image).float().unsqueeze(0).unsqueeze(0)
+        elif len(image.shape) == 3 and image.shape[2] == 1:
+            # Grayscale image with channel dimension
+            tensor = torch.from_numpy(image).float().permute(2, 0, 1).unsqueeze(0)
+        elif len(image.shape) == 3:
+            # RGB image - convert to grayscale
+            if image.shape[2] == 3:
+                # RGB to grayscale conversion
+                gray = 0.299 * image[:, :, 0] + 0.587 * image[:, :, 1] + 0.114 * image[:, :, 2]
+                tensor = torch.from_numpy(gray).float().unsqueeze(0).unsqueeze(0)
+            else:
+                tensor = torch.from_numpy(image).float().unsqueeze(0)
+        else:
+            raise ValueError(f"Unsupported image shape: {image.shape}")
+
+        return tensor.to(self.device)
+
+    def _apply_filters(self, image: np.ndarray) -> torch.Tensor:
+        """Apply Gabor filter bank to image using PyTorch."""
+        tensor = self._image_to_tensor(image)
+
+        # Apply filter bank (already includes multiple scales)
+        with torch.no_grad():
+            responses = self.filter_bank(tensor)
+
+        # Remove batch dimension and permute to (H, W, C)
+        return responses.squeeze(0).permute(1, 2, 0)
 
     def memorize_target(self, target_image: np.ndarray, bbox: dict):
         """
@@ -41,54 +92,66 @@ class VisualSearchModel:
         target_center_x = (x1 + x2) // 2
         target_center_y = (y1 + y2) // 2
 
-        # Get filter responses for entire image
-        image_responses = self.filter_bank.apply_filters(target_image, self.scales)
+        # Get filter responses for entire image using PyTorch
+        image_responses = self._apply_filters(target_image)
 
         # Extract response vector at target center (x_t, y_t) as in the paper
         self.target_template = image_responses[target_center_y, target_center_x, :]
         self.target_bbox = bbox
 
-    def compute_saliency_map(self, scene_responses: np.ndarray, current_scale_level: int) -> np.ndarray:
+    def compute_saliency_map(self, scene_responses: torch.Tensor, current_scale_level: int) -> torch.Tensor:
         """
         Compute saliency map using scales from coarsest to current_scale_level.
         As described in the paper: start with coarsest scale, progressively add finer scales.
         current_scale_level: 0=first fixation (coarsest only), 2=final fixation (all scales)
-        scene_responses: Pre-computed filter responses for the entire image
+        scene_responses: Pre-computed filter responses for the entire image (PyTorch tensor)
         """
         if self.target_template is None:
             raise ValueError("No target template stored. Call memorize_target first.")
 
-        height, width = scene_responses.shape[:2]
+        # Use scales from coarsest up to and including current_scale_level
+        # Channel organization: 0=DC, 1-8=coarsest, 9-16=scale2, 17-24=scale3, 25-32=finest
+        # Fixation 1: DC + coarsest (channels 0-8)
+        # Fixation 2: DC + coarsest + scale2 (channels 0-16)
+        # Fixation 3: DC + coarsest + scale2 + scale3 (channels 0-24)
 
-        # Use scales from coarsest (0) up to and including current_scale_level
-        # Fixation 1: scales [0] (coarsest only)
-        # Fixation 2: scales [0, 1] (coarsest + next)
-        # Fixation 3: scales [0, 1, 2] (all scales)
-        num_filters = len(self.filter_bank.filters)
+        # Always include DC component (channel 0)
+        channels_to_use = [0]
 
-        saliency_map = np.zeros((height, width))
+        # Add scale channels based on current_scale_level
+        filters_per_scale = 8
+        for scale_idx in range(current_scale_level + 1):
+            start_idx = 1 + scale_idx * filters_per_scale  # +1 to skip DC component
+            end_idx = 1 + (scale_idx + 1) * filters_per_scale
+            channels_to_use.extend(range(start_idx, end_idx))
 
-        for y in range(height):
-            for x in range(width):
-                distance = 0
-                # Integrate from coarsest scale (0) to current scale level
-                for scale_idx in range(current_scale_level + 1):
-                    for filter_idx in range(num_filters):
-                        response_idx = scale_idx * num_filters + filter_idx
-                        scene_response = scene_responses[y, x, response_idx]
-                        target_response = self.target_template[response_idx]
-                        distance += (scene_response - target_response) ** 2
+        # Extract relevant channels
+        scene_subset = scene_responses[:, :, channels_to_use]  # (H, W, selected_channels)
+        target_subset = self.target_template[channels_to_use]  # (selected_channels,)
 
-                saliency_map[y, x] = distance
+        # Compute squared differences using broadcasting
+        # scene_subset: (H, W, C), target_subset: (C,) -> (H, W, C)
+        differences = scene_subset - target_subset.unsqueeze(0).unsqueeze(0)
+
+        # Sum squared differences across channels
+        saliency_map = torch.sum(differences ** 2, dim=2)  # (H, W)
+
+        # Normalize the saliency map
+        saliency_min = torch.min(saliency_map)
+        saliency_max = torch.max(saliency_map)
+        if saliency_max > saliency_min:
+            saliency_map = (saliency_map - saliency_min) / (saliency_max - saliency_min)
+        else:
+            saliency_map = torch.zeros_like(saliency_map)
 
         return saliency_map
 
-    def weighted_population_averaging(self, saliency_map: np.ndarray, lambda_k: float) -> Tuple[int, int]:
+    def weighted_population_averaging(self, saliency_map: torch.Tensor, lambda_k: float) -> Tuple[int, int]:
         """
         Compute next fixation using weighted population averaging (Equations 7 and 8).
 
         Args:
-            saliency_map: Saliency values S(x,y) from equation 6
+            saliency_map: Saliency values S(x,y) from equation 6 (PyTorch tensor)
             lambda_k: Temperature parameter λ(k) for the current iteration
 
         Returns:
@@ -96,26 +159,27 @@ class VisualSearchModel:
         """
         height, width = saliency_map.shape
 
-        # Create coordinate grids
-        x_coords, y_coords = np.meshgrid(np.arange(width), np.arange(height))
+        # Create coordinate grids using PyTorch
+        x_coords = torch.arange(width, device=self.device, dtype=torch.float32).unsqueeze(0).expand(height, -1)
+        y_coords = torch.arange(height, device=self.device, dtype=torch.float32).unsqueeze(1).expand(-1, width)
 
         # Compute weights using equation 8: F(S(x,y)) = exp(-S(x,y)/λ(k))
         # Note: negative sign because lower saliency (better match) should have higher weight
-        weights = np.exp(-saliency_map / lambda_k)
+        weights = torch.exp(-saliency_map / lambda_k)
 
         # Normalize weights to sum to 1
-        weight_sum = np.sum(weights)
+        weight_sum = torch.sum(weights)
         if weight_sum > 0:
             normalized_weights = weights / weight_sum
         else:
             # Fallback: uniform weights if all weights are zero
-            normalized_weights = np.ones_like(weights) / (height * width)
+            normalized_weights = torch.ones_like(weights) / (height * width)
 
         # Compute weighted average position (equation 7)
-        x_target = np.sum(normalized_weights * x_coords)
-        y_target = np.sum(normalized_weights * y_coords)
+        x_target = torch.sum(normalized_weights * x_coords)
+        y_target = torch.sum(normalized_weights * y_coords)
 
-        return int(round(x_target)), int(round(y_target))
+        return int(round(x_target.item())), int(round(y_target.item()))
 
     def visual_search(self, image: np.ndarray) -> List[Tuple[int, int]]:
         """
@@ -126,7 +190,7 @@ class VisualSearchModel:
             raise ValueError("No target template stored. Call memorize_target first.")
 
         # Compute filter responses for entire image once (optimization)
-        scene_responses = self.filter_bank.apply_filters(image, self.scales)
+        scene_responses = self._apply_filters(image)
 
         fixations = []
 
@@ -174,110 +238,11 @@ class VisualSearchModel:
         plt.tight_layout()
         plt.show()
 
-    def visualize_filter_responses(self, image: np.ndarray):
-        """Visualize filter responses for target patch and full image."""
-        if self.target_template is None or self.target_bbox is None:
-            print("No target template or bounding box available for filter visualization")
-            return
-
-        # Use stored bounding box to extract target patch
-        x1, y1 = int(self.target_bbox['x1']), int(self.target_bbox['y1'])
-        x2, y2 = int(self.target_bbox['x2']), int(self.target_bbox['y2'])
-
-        # Ensure coordinates are within image bounds
-        height, width = image.shape[:2]
-        x1 = max(0, min(x1, width - 1))
-        x2 = max(0, min(x2, width))
-        y1 = max(0, min(y1, height - 1))
-        y2 = max(0, min(y2, height))
-
-        target_patch = image[y1:y2, x1:x2]
-
-        # Get filter responses for target patch and full image
-        target_responses = self.filter_bank.apply_filters(target_patch, self.scales)
-        image_responses = self.filter_bank.apply_filters(image, self.scales)
-
-        # Select example filters to show (one from each derivative order)
-        example_filters = [
-            (0, 'G0 - Gaussian'),           # Scale 0, Filter 0 (Gaussian)
-            (1, 'G1x - 1st derivative X'),  # Scale 0, Filter 1 (G1x)
-            (3, 'G2xx - 2nd derivative XX'), # Scale 0, Filter 3 (G2xx)
-            (6, 'G3xxx - 3rd derivative XXX') # Scale 0, Filter 6 (G3xxx)
-        ]
-
-        n_filters = len(example_filters)
-        n_scales = len(self.scales)
-
-        # Create figure with better spacing
-        fig = plt.figure(figsize=(24, 16))
-
-        # Use gridspec for better control
-        from matplotlib.gridspec import GridSpec
-        gs = GridSpec(n_filters * 2, n_scales + 2, figure=fig,
-                     wspace=0.4, hspace=0.6,
-                     left=0.05, right=0.95, top=0.92, bottom=0.08)
-
-        for filter_idx, (base_filter_idx, filter_name) in enumerate(example_filters):
-            # Show target patch (leftmost column) - spans both rows
-            ax_patch = fig.add_subplot(gs[filter_idx*2:(filter_idx+1)*2, 0])
-            if len(target_patch.shape) == 3:
-                ax_patch.imshow(target_patch)
-            else:
-                ax_patch.imshow(target_patch, cmap='gray')
-            ax_patch.set_title(f'Target Patch\n{filter_name}', fontsize=10, pad=10)
-            ax_patch.axis('off')
-
-            # Show filter kernel (second column) - spans both rows
-            ax_kernel = fig.add_subplot(gs[filter_idx*2:(filter_idx+1)*2, 1])
-            kernel = self.filter_bank.filters[base_filter_idx]
-            im_kernel = ax_kernel.imshow(kernel, cmap='RdBu_r',
-                                       vmin=-np.max(np.abs(kernel)),
-                                       vmax=np.max(np.abs(kernel)))
-            ax_kernel.set_title('Filter Kernel', fontsize=10, pad=10)
-            ax_kernel.axis('off')
-            cbar_kernel = plt.colorbar(im_kernel, ax=ax_kernel, shrink=0.8, aspect=30)
-            cbar_kernel.ax.tick_params(labelsize=8)
-
-            # Show responses at different scales
-            for scale_idx in range(n_scales):
-                response_idx = scale_idx * len(self.filter_bank.filters) + base_filter_idx
-                target_response = target_responses[:, :, response_idx]
-
-                # Top half: target patch response
-                ax_top = fig.add_subplot(gs[filter_idx * 2, scale_idx + 2])
-                im1 = ax_top.imshow(target_response, cmap='RdBu_r')
-                ax_top.set_title(f'Target Response\nScale {self.scales[scale_idx]:.1f}',
-                               fontsize=9, pad=8)
-                ax_top.axis('off')
-                cbar1 = plt.colorbar(im1, ax=ax_top, shrink=0.8, aspect=15)
-                cbar1.ax.tick_params(labelsize=7)
-
-                # Bottom half: full image response
-                ax_bottom = fig.add_subplot(gs[filter_idx * 2 + 1, scale_idx + 2])
-
-                # Show full image response
-                image_response = image_responses[:, :, response_idx]
-
-                im2 = ax_bottom.imshow(image_response, cmap='RdBu_r')
-                ax_bottom.set_title('Image Response', fontsize=9, pad=8)
-                ax_bottom.axis('off')
-
-                # Mark target center in full image response
-                target_center_x = (x1 + x2) // 2
-                target_center_y = (y1 + y2) // 2
-                ax_bottom.plot(target_center_x, target_center_y, 'g*', markersize=8)
-
-                cbar2 = plt.colorbar(im2, ax=ax_bottom, shrink=0.8, aspect=15)
-                cbar2.ax.tick_params(labelsize=7)
-
-        plt.suptitle('Filter Responses: Target vs Image', fontsize=16, y=0.96)
-        plt.show()
-
     def visualize_consecutive_saliency_maps(self, image: np.ndarray, fixations: List[Tuple[int, int]],
                                           target_location: Optional[Tuple[int, int]] = None):
         """Visualize all consecutive saliency maps for each fixation."""
         # Compute filter responses once
-        scene_responses = self.filter_bank.apply_filters(image, self.scales)
+        scene_responses = self._apply_filters(image)
 
         n_scales = len(self.scales)
 
@@ -290,8 +255,11 @@ class VisualSearchModel:
         for scale_level in range(n_scales):
             saliency_map = self.compute_saliency_map(scene_responses, scale_level)
 
+            # Convert to numpy for visualization
+            saliency_np = saliency_map.cpu().numpy()
+
             # Invert saliency for visualization: high values = good matches
-            saliency_inverted = np.max(saliency_map) - saliency_map
+            saliency_inverted = np.max(saliency_np) - saliency_np
 
             ax = axes[0, scale_level]
             im = ax.imshow(saliency_inverted, cmap='hot')
