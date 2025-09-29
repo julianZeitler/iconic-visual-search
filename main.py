@@ -252,6 +252,100 @@ def process_single_image(image_name: str, show_filters: bool = False, show_salie
     }
 
 
+def process_outside_case(image_name: str = "astronauts", crop_x: int = 350, show_filters: bool = False, show_saliency: bool = False):
+    """
+    Process the 'outside' case where target is memorized from original image
+    but search is performed on a cropped image where target is not present.
+
+    Args:
+        image_name: Name of the image to use (default: "astronauts")
+        crop_x: X coordinate where to crop the image (default: 350)
+        show_filters: Whether to show filter responses
+        show_saliency: Whether to show saliency maps
+    """
+    # Load annotations
+    annotations_path = "images/annotations.json"
+    if not os.path.exists(annotations_path):
+        print(f"Error: {annotations_path} not found")
+        return None
+
+    annotations = load_annotations(annotations_path)
+
+    if image_name not in annotations:
+        print(f"Error: Image '{image_name}' not found in annotations")
+        print(f"Available images: {list(annotations.keys())}")
+        return None
+
+    data = annotations[image_name]
+    print(f"Processing 'outside' case with: {image_name}")
+
+    # Load original image
+    image_path = f"images/{image_name}.jpg"
+    if not os.path.exists(image_path):
+        print(f"  Error: {image_path} not found")
+        return None
+
+    original_image = cv2.imread(image_path)
+    if original_image is None:
+        print(f"  Error: Could not load {image_path}")
+        return None
+
+    original_image = cv2.cvtColor(original_image, cv2.COLOR_BGR2RGB)
+
+    # Get target location from bounding box
+    if not data['bounding_boxes']:
+        print(f"  Error: No bounding boxes found for {image_name}")
+        return None
+
+    bbox = data['bounding_boxes'][0]  # Use first target
+    target_location = (int((bbox['x1'] + bbox['x2']) / 2), int((bbox['y1'] + bbox['y2']) / 2))
+
+    print(f"  Original image size: {original_image.shape}")
+    print(f"  Target location in original: {target_location}")
+    print(f"  Cropping at x={crop_x}")
+
+    # Create cropped image (remove everything from x=crop_x onwards)
+    cropped_image = original_image[:, :crop_x, :]
+    print(f"  Cropped image size: {cropped_image.shape}")
+
+    # Check if target is still in cropped image
+    target_in_cropped = target_location[0] < crop_x
+    print(f"  Target present in cropped image: {target_in_cropped}")
+
+    # Initialize model and memorize target from ORIGINAL image
+    model = VisualSearchModel()
+    model.memorize_target(original_image, bbox)
+    print("  Target memorized from original image")
+
+    # Perform visual search on CROPPED image
+    fixations = model.visual_search(cropped_image)
+    print("  Visual search performed on cropped image")
+
+    # Visualize results
+    if show_filters:
+        print("  Creating detailed visualization with filter responses...")
+        # For outside case, don't show target location since it's not in the search image
+        model.visualize_search(cropped_image, fixations, None)
+    elif show_saliency:
+        print("  Creating consecutive saliency maps visualization...")
+        model.visualize_consecutive_saliency_maps(cropped_image, fixations, None)
+    else:
+        print("  Creating basic visualization...")
+        model.visualize_search(cropped_image, fixations, None)
+
+    return {
+        'image_name': f"{image_name}_outside",
+        'original_image': original_image,
+        'cropped_image': cropped_image,
+        'crop_x': crop_x,
+        'target_location': target_location,
+        'target_in_cropped': target_in_cropped,
+        'bbox': bbox,
+        'fixations': fixations,
+        'model': model
+    }
+
+
 def create_individual_plots(results):
     """Create detailed individual plots for each image."""
     for result in results:
@@ -297,6 +391,7 @@ def main():
         print("Commands:")
         print("  <image_name>  : Process single image (e.g., 'ladybug', 'monkey')")
         print("  all           : Process all images with summary plots")
+        print("  outside       : Process outside case (target memorized from original, search on cropped)")
         print("  list          : List available images")
         print()
         print("Options:")
@@ -308,6 +403,7 @@ def main():
         print("  python main.py ladybug")
         print("  python main.py monkey --filters")
         print("  python main.py ladybug --saliency")
+        print("  python main.py outside --saliency")
         print("  python main.py all")
         print("  python main.py all --details")
         print("  python main.py list")
@@ -323,6 +419,14 @@ def main():
                 print(f"  - {image_name}")
         else:
             print(f"Error: {annotations_path} not found")
+        return
+
+    if command.lower() == 'outside':
+        # Process outside case
+        print("Visual Search Model - Processing Outside Case")
+        print("=" * 50)
+
+        result = process_outside_case(show_filters=args.filters, show_saliency=args.saliency)
         return
 
     if command.lower() == 'all':

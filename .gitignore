@@ -37,6 +37,9 @@ ENV/
 env.bak/
 venv.bak/
 
+# UV package manager
+uv.lock
+
 # Jupyter Notebook
 .ipynb_checkpoints
 
