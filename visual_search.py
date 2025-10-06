@@ -33,7 +33,6 @@ class VisualSearchModel:
             energy_mode="substitute"
         ).to(self.device)
         self.target_template = None
-        self.target_bbox = None
         self.temperature_schedule = [0.01, 0.005, 0.001]
 
     def _image_to_tensor(self, image: np.ndarray) -> torch.Tensor:
@@ -57,13 +56,21 @@ class VisualSearchModel:
 
         return tensor.to(self.device)
 
-    def _apply_filters(self, image: np.ndarray) -> torch.Tensor:
+    def _apply_filters(self, image) -> torch.Tensor:
         """Apply Gabor filter bank to image using PyTorch."""
-        tensor = self._image_to_tensor(image)
+        # Convert to tensor if needed
+        if isinstance(image, np.ndarray):
+            image = self._image_to_tensor(image)
+
+        # Ensure image has 4 dimensions (B, C, H, W)
+        if image.dim() == 2:
+            image = image.unsqueeze(0).unsqueeze(0)  # Add batch and channel dims
+        elif image.dim() == 3:
+            image = image.unsqueeze(0)  # Add batch dim
 
         # Apply filter bank (already includes multiple scales)
         with torch.no_grad():
-            responses = self.filter_bank(tensor)
+            responses = self.filter_bank(image)
 
         # Remove batch dimension and permute to (H, W, C)
         return responses.squeeze(0).permute(1, 2, 0)
@@ -97,7 +104,82 @@ class VisualSearchModel:
 
         # Extract response vector at target center (x_t, y_t) as in the paper
         self.target_template = image_responses[target_center_y, target_center_x, :]
-        self.target_bbox = bbox
+
+    def memorize_target_batch(self, instances: List[dict]):
+        """
+        Memorize target from a batch of object instances.
+        Computes mean and variance across all instance responses.
+
+        Args:
+            instances: List of instance dictionaries from dataset_handler.find_instances()
+                      Each should contain 'image' (PIL Image or np.ndarray) and 'bbox_dict'
+        """
+        if len(instances) == 0:
+            raise ValueError("Cannot memorize from empty batch of instances")
+
+        response_vectors = []
+
+        # Extract response vector from each instance
+        for instance in instances:
+            # Get image
+            if 'image' in instance:
+                img = instance['image']
+                if hasattr(img, 'convert'):  # PIL Image
+                    img_tensor = self._image_to_tensor(np.array(img.convert('L')))
+                else:  # numpy array
+                    img_tensor = self._image_to_tensor(img)
+            else:
+                raise ValueError("Instance must contain 'image' field")
+
+            # Get bounding box
+            bbox = instance['bbox_dict']
+
+            # Calculate center coordinates
+            x1, y1 = int(bbox['x1']), int(bbox['y1'])
+            x2, y2 = int(bbox['x2']), int(bbox['y2'])
+
+            # Ensure coordinates are within image bounds (tensor shape is B, C, H, W)
+            height, width = img_tensor.shape[-2], img_tensor.shape[-1]
+            x1 = max(0, min(x1, width - 1))
+            x2 = max(0, min(x2, width))
+            y1 = max(0, min(y1, height - 1))
+            y2 = max(0, min(y2, height))
+
+            # Ensure valid bounding box
+            if x2 <= x1 or y2 <= y1:
+                print(f"Warning: Skipping invalid bounding box in instance (image_id: {instance.get('image_id', 'unknown')})")
+                continue
+
+            # Calculate target center
+            center_x = (x1 + x2) // 2
+            center_y = (y1 + y2) // 2
+
+            # Get filter responses for entire image
+            image_responses = self._apply_filters(img_tensor)
+
+            # Extract response vector at target center
+            response_vector = image_responses[center_y, center_x, :]
+            response_vectors.append(response_vector)
+
+        if len(response_vectors) == 0:
+            raise ValueError("No valid instances found in batch")
+
+        # Stack all response vectors: (num_instances, num_features)
+        stacked_responses = torch.stack(response_vectors, dim=0)
+
+        # Compute mean across all instances
+        mean_response = torch.mean(stacked_responses, dim=0)
+
+        # Compute variance across all instances
+        variance_response = torch.var(stacked_responses, dim=0)
+
+        # Store both mean and variance as the target template
+        self.target_template = mean_response
+        self.target_variance = variance_response
+
+        print(f"Memorized target from {len(response_vectors)} instances")
+        print(f"Response mean range: [{mean_response.min():.4f}, {mean_response.max():.4f}]")
+        print(f"Response variance range: [{variance_response.min():.4f}, {variance_response.max():.4f}]")
 
     def compute_saliency_map(self, scene_responses: torch.Tensor, current_scale_level: int) -> torch.Tensor:
         """
