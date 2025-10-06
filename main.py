@@ -166,7 +166,7 @@ def create_summary_plots(results):
     print(f"Worst performance: {max(distances):.1f} pixels ({image_names[distances.index(max(distances))]})")
 
 
-def process_single_image(image_name: str, show_filters: bool = False, show_saliency: bool = False):
+def process_single_image(image_name: str, show_saliency: bool = False):
     """Process a single image with its annotations."""
     # Load annotations
     annotations_path = "images/annotations.json"
@@ -231,16 +231,12 @@ def process_single_image(image_name: str, show_filters: bool = False, show_salie
     print(f"  Final distance to target: {distance_to_target:.1f} pixels")
 
     # Visualize results
-    if show_filters:
-        print("  Creating detailed visualization with filter responses...")
-        model.visualize_search(image, fixations, target_location)
-    elif show_saliency:
+    print("  Creating basic visualization...")
+    model.visualize_search(image, fixations, target_location)
+    if show_saliency:
         print("  Creating consecutive saliency maps visualization...")
         model.visualize_consecutive_saliency_maps(image, fixations, target_location)
-    else:
-        print("  Creating basic visualization...")
-        model.visualize_search(image, fixations, target_location)
-
+    
     return {
         'image_name': image_name,
         'image': image,
@@ -363,7 +359,6 @@ def main():
         epilog='Examples:\n'
                '  python main.py ladybug           # Process ladybug image\n'
                '  python main.py all               # Process all images\n'
-               '  python main.py monkey --filters  # Process monkey with filter details\n'
                '  python main.py ladybug --saliency # Show consecutive saliency maps\n'
                '  python main.py list              # List available images\n',
         formatter_class=argparse.RawDescriptionHelpFormatter
@@ -371,8 +366,6 @@ def main():
 
     parser.add_argument('command', nargs='?',
                        help='Image name, "all", or "list"')
-    parser.add_argument('--filters', '-f', action='store_true',
-                       help='Show detailed filter responses (for single image mode)')
     parser.add_argument('--details', '-d', action='store_true',
                        help='Create individual detailed plots for each image (for "all" mode)')
     parser.add_argument('--saliency', '-s', action='store_true',
@@ -395,13 +388,11 @@ def main():
         print("  list          : List available images")
         print()
         print("Options:")
-        print("  --filters/-f   : Show detailed filter responses (for single image)")
         print("  --saliency/-s  : Show consecutive saliency maps (for single image)")
         print("  --details/-d   : Create individual detailed plots (for 'all' mode)")
         print()
         print("Examples:")
         print("  python main.py ladybug")
-        print("  python main.py monkey --filters")
         print("  python main.py ladybug --saliency")
         print("  python main.py outside --saliency")
         print("  python main.py all")
@@ -460,7 +451,7 @@ def main():
     print(f"Visual Search Model - Processing Single Image: {image_name}")
     print("=" * 50)
 
-    result = process_single_image(image_name, show_filters=args.filters, show_saliency=args.saliency)
+    result = process_single_image(image_name, show_saliency=args.saliency)
     if result:
         print(f"\nProcessing complete for {image_name}!")
         print(f"Final distance to target: {result['final_distance']:.1f} pixels")
