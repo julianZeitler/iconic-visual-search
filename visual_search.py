@@ -24,7 +24,7 @@ class VisualSearchModel:
             n_phases=2,
             fmax=0.3,
             scale=5,
-            gaussian=False,
+            gaussian=True,
             gaussian_inverse=False,
             n_stds=3,
             dc_compensate=True,
@@ -121,8 +121,8 @@ class VisualSearchModel:
         # Add scale channels based on current_scale_level
         filters_per_scale = 8
         for scale_idx in range(current_scale_level + 1):
-            start_idx = scale_idx * filters_per_scale  # +1 to skip DC component
-            end_idx = (scale_idx + 1) * filters_per_scale
+            start_idx = 1 + scale_idx * filters_per_scale  # +1 to skip DC component
+            end_idx = 1 + (scale_idx + 1) * filters_per_scale
             channels_to_use.extend(range(start_idx, end_idx))
 
         # Extract relevant channels
