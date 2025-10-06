@@ -30,25 +30,19 @@ dependencies = [
     "numpy>=1.20.0",
     "opencv-python>=4.5.0",
     "scipy>=1.7.0",
-    "matplotlib>=3.3.0",
-    "typing-extensions>=4.0.0; python_version<'3.10'",
+    "matplotlib",
+    "typing-extensions>=4.0.0",
     "torch>=1.13.0",
+    "torchvision",
     "gist",
     "cvtools",
 ]
 
 [project.optional-dependencies]
 dev = [
-    "pytest>=6.0",
-    "pytest-cov",
-    "black",
-    "isort",
-    "flake8",
-    "mypy",
-]
-docs = [
-    "sphinx",
-    "sphinx-rtd-theme",
+    "ipykernel",
+    "pycocotools",
+    "pip"
 ]
 
 [project.urls]
@@ -78,3 +72,11 @@ disallow_untyped_defs = true
 [tool.uv.sources]
 gist = { path = "../gist" }
 cvtools = { path = "../cvtools" }
+torch = { index = "pytorch-cu124" }
+torchvision = { index = "pytorch-cu124" }
+torchaudio = { index = "pytorch-cu124" }
+
+[[tool.uv.index]]
+name = "pytorch-cu124"
+url = "https://download.pytorch.org/whl/cu124"
+explicit = true
