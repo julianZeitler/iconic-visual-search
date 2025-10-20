@@ -35,6 +35,11 @@ class VisualSearchModel:
         self.target_template = None
         self.temperature_schedule = [0.01, 0.005, 0.001]
 
+    def clear_cache(self):
+        """Clear GPU cache to free memory."""
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
     def _image_to_tensor(self, image: np.ndarray) -> torch.Tensor:
         """Convert numpy image to PyTorch tensor with proper shape and normalization."""
         if len(image.shape) == 2:
@@ -73,7 +78,13 @@ class VisualSearchModel:
             responses = self.filter_bank(image)
 
         # Remove batch dimension and permute to (H, W, C)
-        return responses.squeeze(0).permute(1, 2, 0)
+        result = responses.squeeze(0).permute(1, 2, 0)
+
+        # Clean up intermediate tensors
+        del responses
+        del image
+
+        return result
 
     def memorize_target(self, target_image: np.ndarray, bbox: dict):
         """

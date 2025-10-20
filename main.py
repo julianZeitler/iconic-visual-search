@@ -4,6 +4,7 @@ import json
 import os
 import argparse
 import matplotlib.pyplot as plt
+import torch
 from visual_search import VisualSearchModel
 
 
@@ -236,6 +237,8 @@ def process_single_image(image_name: str, show_saliency: bool = False):
     if show_saliency:
         print("  Creating consecutive saliency maps visualization...")
         model.visualize_consecutive_saliency_maps(image, fixations, target_location)
+
+    model.clear_cache()
     
     return {
         'image_name': image_name,
@@ -248,7 +251,7 @@ def process_single_image(image_name: str, show_saliency: bool = False):
     }
 
 
-def process_outside_case(image_name: str = "astronauts", crop_x: int = 350, show_filters: bool = False, show_saliency: bool = False):
+def process_outside_case(image_name: str = "astronauts", crop_x: int = 350, show_saliency: bool = False, noise: float = 0.0):
     """
     Process the 'outside' case where target is memorized from original image
     but search is performed on a cropped image where target is not present.
@@ -311,6 +314,11 @@ def process_outside_case(image_name: str = "astronauts", crop_x: int = 350, show
     # Initialize model and memorize target from ORIGINAL image
     model = VisualSearchModel()
     model.memorize_target(original_image, bbox)
+    if noise > 0 and model.target_template is not None:
+        # Add Gaussian noise to target template (noise is the standard deviation)
+        gaussian_noise = torch.randn_like(model.target_template) * noise
+        print(f"Adding noise: {gaussian_noise.cpu().detach().numpy()}")
+        model.target_template = model.target_template + gaussian_noise
     print("  Target memorized from original image")
 
     # Perform visual search on CROPPED image
@@ -318,16 +326,13 @@ def process_outside_case(image_name: str = "astronauts", crop_x: int = 350, show
     print("  Visual search performed on cropped image")
 
     # Visualize results
-    if show_filters:
-        print("  Creating detailed visualization with filter responses...")
-        # For outside case, don't show target location since it's not in the search image
-        model.visualize_search(cropped_image, fixations, None)
-    elif show_saliency:
+    print("  Creating basic visualization...")
+    model.visualize_search(cropped_image, fixations, target_location)
+    if show_saliency:
         print("  Creating consecutive saliency maps visualization...")
-        model.visualize_consecutive_saliency_maps(cropped_image, fixations, None)
-    else:
-        print("  Creating basic visualization...")
-        model.visualize_search(cropped_image, fixations, None)
+        model.visualize_consecutive_saliency_maps(cropped_image, fixations, target_location)
+    
+    model.clear_cache()
 
     return {
         'image_name': f"{image_name}_outside",
@@ -417,7 +422,7 @@ def main():
         print("Visual Search Model - Processing Outside Case")
         print("=" * 50)
 
-        result = process_outside_case(show_filters=args.filters, show_saliency=args.saliency)
+        result = process_outside_case(show_saliency=args.saliency, noise=1)
         return
 
     if command.lower() == 'all':
