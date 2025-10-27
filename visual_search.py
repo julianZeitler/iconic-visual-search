@@ -1,5 +1,7 @@
 import numpy as np
 import torch
+import torch.nn as nn
+from torchvision import transforms
 import matplotlib.pyplot as plt
 from typing import List, Tuple, Optional
 from gist.layers.gabor_filter_bank import GaborFilterbank
@@ -11,27 +13,13 @@ class VisualSearchModel:
     Uses coarse-to-fine strategy with weighted population averaging.
     """
 
-    def __init__(self, scales: List[float] = [2.0, 1.0, 0.5], device: str = "cuda" if torch.cuda.is_available() else "cpu"):
-        self.scales = scales
+    def __init__(self, gist: nn.Module, backbone: nn.Module, device: str = "cuda" if torch.cuda.is_available() else "cpu", img_size: Tuple[int,int]=(256, 256)):
         self.device = torch.device(device)
-        self.filter_bank = GaborFilterbank(
-            in_channels=1,
-            mode="static",
-            bandwidth=0.1,
-            theta=np.pi/5,
-            n_scales=3,
-            n_orientations=8,
-            n_phases=2,
-            fmax=0.3,
-            scale=5,
-            gaussian=True,
-            gaussian_inverse=False,
-            n_stds=3,
-            dc_compensate=True,
-            stride=1,
-            energy=True,
-            energy_mode="substitute"
-        ).to(self.device)
+        self.gist = gist.to(self.device)
+        self.backbone = backbone.to(self.device)
+        self.transform = transforms.Compose([
+            transforms.Resize(img_size)
+        ])
         self.target_template = None
         self.temperature_schedule = [0.01, 0.005, 0.001]
 
@@ -61,127 +49,197 @@ class VisualSearchModel:
 
         return tensor.to(self.device)
 
-    def _apply_filters(self, image) -> torch.Tensor:
-        """Apply Gabor filter bank to image using PyTorch."""
-        # Convert to tensor if needed
-        if isinstance(image, np.ndarray):
-            image = self._image_to_tensor(image)
+    def _apply_backbone(self, x, response_layer: Optional[int] = None, batch_norm: bool = True) -> torch.Tensor:
+        """Apply backbone to image. Output is response of layer with idx 'response_layer'."""
+        if isinstance(x, np.ndarray):
+            x = self._image_to_tensor(x)
 
         # Ensure image has 4 dimensions (B, C, H, W)
-        if image.dim() == 2:
-            image = image.unsqueeze(0).unsqueeze(0)  # Add batch and channel dims
-        elif image.dim() == 3:
-            image = image.unsqueeze(0)  # Add batch dim
+        if x.dim() == 2:
+            x = x.unsqueeze(0).unsqueeze(0)  # Add batch and channel dims
+        elif x.dim() == 3:
+            x = x.unsqueeze(0)  # Add batch dim
 
-        # Apply filter bank (already includes multiple scales)
+        x = self.gist(x)
+
         with torch.no_grad():
-            responses = self.filter_bank(image)
+            for i, layer in enumerate(self.backbone.features):
+                if response_layer and i > response_layer:
+                    break
 
-        # Remove batch dimension and permute to (H, W, C)
-        result = responses.squeeze(0).permute(1, 2, 0)
+                if isinstance(layer, nn.BatchNorm2d) and not batch_norm:
+                    continue
+                elif isinstance(layer, nn.BatchNorm2d) or isinstance(layer, nn.InstanceNorm2d):
+                    if x.shape[-2] == 1 or x.shape[-1] == 1:
+                        # don't apply instance norm for single-dimension feature maps
+                        continue
+                elif isinstance(layer, nn.AdaptiveAvgPool2d):
+                    continue
+                elif isinstance(layer, nn.Flatten):
+                    continue
+                
+                x = layer(x)
+        return x
+    
+    def _get_coordinate_scaling(self, orig_height: int, orig_width: int, feat_height: int, feat_width: int) -> Tuple[float, float]:
+        """
+        Helper method to compute scaling factors from original image space to feature map space.
 
-        # Clean up intermediate tensors
-        del responses
-        del image
+        Args:
+            orig_height: Height of original image
+            orig_width: Width of original image
+            feat_height: Height of feature map
+            feat_width: Width of feature map
 
-        return result
+        Returns:
+            (scale_x, scale_y): Scaling factors to map from original coordinates to feature map coordinates
+        """
+        # Get transformed image dimensions (after self.transform is applied)
+        transform_size = None
+        for t in self.transform.transforms:
+            if isinstance(t, transforms.Resize):
+                if isinstance(t.size, int):
+                    transform_size = (t.size, t.size)
+                else:
+                    transform_size = tuple(t.size)
+                break
 
-    def memorize_target(self, target_image: np.ndarray, bbox: dict):
+        if transform_size is None:
+            # Fallback: assume no resize, use original dimensions
+            transform_height, transform_width = orig_height, orig_width
+        else:
+            transform_height, transform_width = transform_size
+
+        # Calculate scaling factors from original image -> transformed image -> feature map
+        # Scale from original image to transformed image
+        scale_x_to_transform = transform_width / orig_width
+        scale_y_to_transform = transform_height / orig_height
+
+        # Scale from transformed image to feature map
+        scale_x_to_feat = feat_width / transform_width
+        scale_y_to_feat = feat_height / transform_height
+
+        # Combined scaling: original image -> feature map
+        scale_x = scale_x_to_transform * scale_x_to_feat
+        scale_y = scale_y_to_transform * scale_y_to_feat
+
+        return scale_x, scale_y
+
+    def memorize_target(self, target_image: np.ndarray, bbox: dict, layer: int = 12):
         """
         Memorize target using bounding box from annotations.
         bbox: dictionary with keys 'x1', 'y1', 'x2', 'y2' defining the target region
         """
-        # Extract target region using bounding box coordinates
+        # Extract target region using bounding box coordinates (in original image space)
         x1, y1 = int(bbox['x1']), int(bbox['y1'])
         x2, y2 = int(bbox['x2']), int(bbox['y2'])
 
+        # Get original image dimensions
+        orig_height, orig_width = target_image.shape[:2]
+
         # Ensure coordinates are within image bounds
-        height, width = target_image.shape[:2]
-        x1 = max(0, min(x1, width - 1))
-        x2 = max(0, min(x2, width))
-        y1 = max(0, min(y1, height - 1))
-        y2 = max(0, min(y2, height))
+        x1 = max(0, min(x1, orig_width - 1))
+        x2 = max(0, min(x2, orig_width))
+        y1 = max(0, min(y1, orig_height - 1))
+        y2 = max(0, min(y2, orig_height))
 
         # Ensure we have a valid bounding box
         if x2 <= x1 or y2 <= y1:
             raise ValueError(f"Invalid bounding box: x1={x1}, y1={y1}, x2={x2}, y2={y2}")
+        
+        x = self._image_to_tensor(target_image)
+        x = self.transform(x)
 
-        # Calculate target center coordinates (x_t, y_t) as in the paper
-        target_center_x = (x1 + x2) // 2
-        target_center_y = (y1 + y2) // 2
+        image_responses = self._apply_backbone(x, response_layer=layer, batch_norm=False)
 
-        # Get filter responses for entire image using PyTorch
-        image_responses = self._apply_filters(target_image)
+        # Get feature map dimensions (C, H_feat, W_feat)
+        shape = image_responses.shape
+        feat_height = shape[-2]
+        feat_width = shape[-1]
+
+        # Get scaling factors using helper method
+        scale_x, scale_y = self._get_coordinate_scaling(orig_height, orig_width, feat_height, feat_width)
+
+        # Calculate target center coordinates (x_t, y_t) in original image space
+        target_center_x_orig = (x1 + x2) / 2.0
+        target_center_y_orig = (y1 + y2) / 2.0
+
+        # Convert center coordinates to feature map space
+        target_center_x_feat = target_center_x_orig * scale_x
+        target_center_y_feat = target_center_y_orig * scale_y
+
+        # Round to nearest integer and ensure within bounds
+        target_center_x_feat = int(round(target_center_x_feat))
+        target_center_y_feat = int(round(target_center_y_feat))
+        target_center_x_feat = max(0, min(target_center_x_feat, feat_width - 1))
+        target_center_y_feat = max(0, min(target_center_y_feat, feat_height - 1))
 
         # Extract response vector at target center (x_t, y_t) as in the paper
-        self.target_template = image_responses[target_center_y, target_center_x, :]
+        self.target_template = image_responses[:, :, target_center_y_feat, target_center_x_feat].squeeze(0)
 
-    def memorize_target_batch(self, instances: List[dict]):
+    def memorize_target_batch(self, image_batch: torch.Tensor, bboxes: List[dict], layer: int = 12):
         """
         Memorize target from a batch of object instances.
         Computes mean and variance across all instance responses.
+        Processes all images as a single batch for efficiency.
 
         Args:
-            instances: List of instance dictionaries from dataset_handler.find_instances()
-                      Each should contain 'image' (PIL Image or np.ndarray) and 'bbox_dict'
+            image_batch: Batch of images as PyTorch tensor (B, C, H, W), normalized to [0, 1]
+            bboxes: List of bounding box dictionaries with keys 'x1', 'y1', 'x2', 'y2'
+                   (coordinates in transformed/resized image space, matching image_batch dimensions)
+            layer: Layer index to extract features from (default: 12)
         """
-        if len(instances) == 0:
-            raise ValueError("Cannot memorize from empty batch of instances")
+        if image_batch.size(0) == 0:
+            raise ValueError("Cannot memorize from empty batch")
 
+        if len(bboxes) != image_batch.size(0):
+            raise ValueError(f"Number of bounding boxes ({len(bboxes)}) must match batch size ({image_batch.size(0)})")
+
+        if image_batch.device != self.device:
+            image_batch = image_batch.to(self.device)
+
+        with torch.no_grad():
+            batch_responses = self._apply_backbone(image_batch, response_layer=layer, batch_norm=False)
+
+        _, _, feat_height, feat_width = batch_responses.shape
+        _, _, img_height, img_width = image_batch.shape
+
+        # Compute scaling from transformed image space to feature map space
+        scale_x = feat_width / img_width
+        scale_y = feat_height / img_height
+
+        # Extract response vectors for each instance at its target center
         response_vectors = []
 
-        # Extract response vector from each instance
-        for instance in instances:
-            # Get image
-            if 'image' in instance:
-                img = instance['image']
-                if hasattr(img, 'convert'):  # PIL Image
-                    img_tensor = self._image_to_tensor(np.array(img.convert('L')))
-                else:  # numpy array
-                    img_tensor = self._image_to_tensor(img)
-            else:
-                raise ValueError("Instance must contain 'image' field")
+        for batch_idx, bbox in enumerate(bboxes):
+            # Get bounding box coordinates (already in transformed image space)
+            x1, y1 = bbox['x1'], bbox['y1']
+            x2, y2 = bbox['x2'], bbox['y2']
 
-            # Get bounding box
-            bbox = instance['bbox_dict']
+            # Calculate target center in transformed image space
+            center_x_img = (x1 + x2) / 2.0
+            center_y_img = (y1 + y2) / 2.0
 
-            # Calculate center coordinates
-            x1, y1 = int(bbox['x1']), int(bbox['y1'])
-            x2, y2 = int(bbox['x2']), int(bbox['y2'])
+            # Convert to feature map space
+            center_x_feat = center_x_img * scale_x
+            center_y_feat = center_y_img * scale_y
 
-            # Ensure coordinates are within image bounds (tensor shape is B, C, H, W)
-            height, width = img_tensor.shape[-2], img_tensor.shape[-1]
-            x1 = max(0, min(x1, width - 1))
-            x2 = max(0, min(x2, width))
-            y1 = max(0, min(y1, height - 1))
-            y2 = max(0, min(y2, height))
-
-            # Ensure valid bounding box
-            if x2 <= x1 or y2 <= y1:
-                print(f"Warning: Skipping invalid bounding box in instance (image_id: {instance.get('image_id', 'unknown')})")
-                continue
-
-            # Calculate target center
-            center_x = (x1 + x2) // 2
-            center_y = (y1 + y2) // 2
-
-            # Get filter responses for entire image
-            image_responses = self._apply_filters(img_tensor)
+            # Round and clamp to valid indices
+            center_x_feat = int(round(center_x_feat))
+            center_y_feat = int(round(center_y_feat))
+            center_x_feat = max(0, min(center_x_feat, feat_width - 1))
+            center_y_feat = max(0, min(center_y_feat, feat_height - 1))
 
             # Extract response vector at target center
-            response_vector = image_responses[center_y, center_x, :]
+            # batch_responses is (B, C, H, W), index as [batch, channels, y, x]
+            response_vector = batch_responses[batch_idx, :, center_y_feat, center_x_feat]
             response_vectors.append(response_vector)
 
-        if len(response_vectors) == 0:
-            raise ValueError("No valid instances found in batch")
-
-        # Stack all response vectors: (num_instances, num_features)
+        # Stack all response vectors: (num_instances, num_channels)
         stacked_responses = torch.stack(response_vectors, dim=0)
 
-        # Compute mean across all instances
+        # Compute mean and variance across all instances
         mean_response = torch.mean(stacked_responses, dim=0)
-
-        # Compute variance across all instances
         variance_response = torch.var(stacked_responses, dim=0)
 
         # Store both mean and variance as the target template
@@ -192,42 +250,18 @@ class VisualSearchModel:
         print(f"Response mean range: [{mean_response.min():.4f}, {mean_response.max():.4f}]")
         print(f"Response variance range: [{variance_response.min():.4f}, {variance_response.max():.4f}]")
 
-    def compute_saliency_map(self, scene_responses: torch.Tensor, current_scale_level: int) -> torch.Tensor:
+    def compute_saliency_map(self, scene_responses: torch.Tensor) -> torch.Tensor:
         """
-        Compute saliency map using scales from coarsest to current_scale_level.
-        As described in the paper: start with coarsest scale, progressively add finer scales.
-        current_scale_level: 0=first fixation (coarsest only), 2=final fixation (all scales)
-        scene_responses: Pre-computed filter responses for the entire image (PyTorch tensor)
+        Compute saliency map
         """
         if self.target_template is None:
             raise ValueError("No target template stored. Call memorize_target first.")
 
-        # Use scales from coarsest up to and including current_scale_level
-        # Channel organization: 0=DC, 1-8=coarsest, 9-16=scale2, 17-24=scale3, 25-32=finest
-        # Fixation 1: DC + coarsest (channels 0-8)
-        # Fixation 2: DC + coarsest + scale2 (channels 0-16)
-        # Fixation 3: DC + coarsest + scale2 + scale3 (channels 0-24)
-
-        # Always include DC component (channel 0)
-        channels_to_use = [0]
-
-        # Add scale channels based on current_scale_level
-        filters_per_scale = 8
-        for scale_idx in range(current_scale_level + 1):
-            start_idx = 1 + scale_idx * filters_per_scale  # +1 to skip DC component
-            end_idx = 1 + (scale_idx + 1) * filters_per_scale
-            channels_to_use.extend(range(start_idx, end_idx))
-
-        # Extract relevant channels
-        scene_subset = scene_responses[:, :, channels_to_use]  # (H, W, selected_channels)
-        target_subset = self.target_template[channels_to_use]  # (selected_channels,)
-
         # Compute squared differences using broadcasting
-        # scene_subset: (H, W, C), target_subset: (C,) -> (H, W, C)
-        differences = scene_subset - target_subset.unsqueeze(0).unsqueeze(0)
+        differences = scene_responses - self.target_template.unsqueeze(0).unsqueeze(-1).unsqueeze(-1)
 
         # Sum squared differences across channels
-        saliency_map = torch.sum(differences ** 2, dim=2)  # (H, W)
+        saliency_map = torch.sum(differences ** 2, dim=1)  # (B, H, W)
 
         # Normalize the saliency map
         saliency_min = torch.min(saliency_map)
@@ -274,137 +308,119 @@ class VisualSearchModel:
 
         return int(round(x_target.item())), int(round(y_target.item()))
 
-    def visual_search(self, image: np.ndarray) -> List[Tuple[int, int]]:
+    def visual_search(self, image: np.ndarray) -> Tuple[torch.Tensor, torch.Tensor, List[Tuple[int, int]]]:
         """
         Perform coarse-to-fine visual search returning sequence of fixations.
-        Returns list of (x, y) fixation points.
+        Returns list of (x, y) fixation points in original image coordinates.
         """
         if self.target_template is None:
             raise ValueError("No target template stored. Call memorize_target first.")
+        
+        x = self._image_to_tensor(image)
+        x = self.transform(x)
 
-        # Compute filter responses for entire image once (optimization)
-        scene_responses = self._apply_filters(image)
+        scene_responses = self._apply_backbone(x)
+
+        orig_height, orig_width = image.shape[:2]
 
         fixations = []
+        saliency_map = self.compute_saliency_map(scene_responses)  # (B, H, W)
 
-        # Coarse-to-fine search
-        for scale_level in range(len(self.scales)):
-            # Compute saliency map at current scale level using pre-computed responses
-            saliency_map = self.compute_saliency_map(scene_responses, scale_level)
+        # Interpolate saliency map to original image size
+        # saliency_map already has batch dimension from compute_saliency_map
+        saliency_map_upsampled = torch.nn.functional.interpolate(
+            saliency_map.unsqueeze(1),  # Add channel dim: (B, 1, H, W)
+            size=(orig_height, orig_width),
+            mode='bilinear',
+            align_corners=False
+        ).squeeze(1)  # Remove channel dim: (B, H, W)
 
-            # Get temperature parameter λ(k) for current iteration
-            lambda_k = self.temperature_schedule[scale_level]
+        for fixation in range(len(self.temperature_schedule)):
+            lambda_k = self.temperature_schedule[fixation]
+            # saliency_map_upsampled has batch dimension, weighted_population_averaging expects (B, H, W)
+            fixation_x_img, fixation_y_img = self.weighted_population_averaging(saliency_map_upsampled.squeeze(0), lambda_k)
 
-            # Compute fixation point using weighted population averaging (equations 7 and 8)
-            fixation_x, fixation_y = self.weighted_population_averaging(saliency_map, lambda_k)
+            fixation_x_img = max(0, min(fixation_x_img, orig_width - 1))
+            fixation_y_img = max(0, min(fixation_y_img, orig_height - 1))
 
-            fixations.append((fixation_x, fixation_y))
+            fixations.append((fixation_x_img, fixation_y_img))
 
-        return fixations
+        # Return first batch element (squeeze batch dimension for single image)
+        return saliency_map, saliency_map_upsampled, fixations
 
-    def visualize_search(self, image: np.ndarray, fixations: List[Tuple[int, int]],
+    def visualize_search(self, image: np.ndarray, saliency_map: torch.Tensor, fixations: List[Tuple[int, int]],
                         target_location: Optional[Tuple[int, int]] = None):
-        """Visualize the search process with fixation sequence."""
-        plt.figure(figsize=(8, 6))
+        """
+        Visualize the visual search process.
 
-        # Show image with fixation sequence
-        if len(image.shape) == 3:
-            plt.imshow(image)
+        Args:
+            image: Original image (numpy array)
+            saliency_map: Saliency map (PyTorch tensor, same size as image)
+            fixations: List of (x, y) fixation coordinates
+            target_location: Optional ground truth target location (x, y)
+        """
+        # Convert saliency map to numpy for visualization
+        if isinstance(saliency_map, torch.Tensor):
+            saliency_map_np = saliency_map.cpu().numpy()
         else:
-            plt.imshow(image, cmap='gray')
+            saliency_map_np = saliency_map
 
-        # Plot fixations with arrows
+        saliency_inverted = np.max(saliency_map_np) - saliency_map_np
+
+        # Create figure with three subplots
+        fig, axes = plt.subplots(1, 3, figsize=(18, 6))
+
+        # Subplot 1: Original image
+        if len(image.shape) == 3:
+            axes[0].imshow(image)
+        else:
+            axes[0].imshow(image, cmap='gray')
+        axes[0].set_title('Original Image', fontsize=14, fontweight='bold')
+        axes[0].axis('off')
+
+        # Subplot 2: Saliency map
+        im = axes[1].imshow(saliency_inverted, cmap='hot', interpolation='bilinear')
+        axes[1].set_title('Inverted Saliency Map', fontsize=14, fontweight='bold')
+        axes[1].axis('off')
+        # Add colorbar
+        cbar = plt.colorbar(im, ax=axes[1], fraction=0.046, pad=0.04)
+        cbar.set_label('Saliency', rotation=270, labelpad=15)
+
+        # Subplot 3: Image with saliency overlay and fixations
+        if len(image.shape) == 3:
+            axes[2].imshow(image)
+        else:
+            axes[2].imshow(image, cmap='gray')
+
+        # Overlay saliency map with transparency
+        axes[2].imshow(saliency_inverted, cmap='hot', alpha=0.4, interpolation='bilinear')
+
+        # Plot fixation sequence with arrows
         for i, (x, y) in enumerate(fixations):
-            plt.plot(x, y, 'ro', markersize=8)
-            plt.text(x+5, y+5, f'{i+1}', color='red', fontweight='bold')
+            # Plot fixation point
+            axes[2].plot(x, y, 'co', markersize=10, markeredgewidth=2, markeredgecolor='white')
+
+            # Add fixation number
+            axes[2].text(x + 8, y + 8, f'{i+1}', color='cyan', fontweight='bold',
+                        fontsize=12, bbox=dict(boxstyle='round,pad=0.3', facecolor='black', alpha=0.7))
+
+            # Draw arrow from previous fixation
             if i > 0:
                 prev_x, prev_y = fixations[i-1]
-                plt.arrow(prev_x, prev_y, x-prev_x, y-prev_y,
-                         head_width=5, head_length=8, fc='red', ec='red')
+                axes[2].annotate('', xy=(x, y), xytext=(prev_x, prev_y),
+                               arrowprops=dict(arrowstyle='->', color='cyan', lw=2,
+                                             connectionstyle='arc3,rad=0.1'))
 
+        # Plot ground truth target location if provided
         if target_location:
-            plt.plot(target_location[0], target_location[1], 'gs',
-                    markersize=12, label='True Target')
-            plt.legend()
+            tx, ty = target_location
+            axes[2].plot(tx, ty, 'g*', markersize=20, markeredgewidth=2,
+                        markeredgecolor='white', label='Ground Truth Target')
+            axes[2].legend(loc='upper right', fontsize=10)
 
-        plt.title('Visual Search: Fixation Sequence')
+        axes[2].set_title('Image + Saliency + Fixations', fontsize=14, fontweight='bold')
+        axes[2].axis('off')
+
         plt.tight_layout()
         plt.show()
-
-    def visualize_consecutive_saliency_maps(self, image: np.ndarray, fixations: List[Tuple[int, int]],
-                                          target_location: Optional[Tuple[int, int]] = None):
-        """Visualize all consecutive saliency maps for each fixation."""
-        # Compute filter responses once
-        scene_responses = self._apply_filters(image)
-
-        n_scales = len(self.scales)
-
-        # Create figure with subplots for all saliency maps
-        fig, axes = plt.subplots(2, n_scales, figsize=(5 * n_scales, 10))
-        if n_scales == 1:
-            axes = axes.reshape(-1, 1)
-
-        # Top row: saliency maps
-        for scale_level in range(n_scales):
-            saliency_map = self.compute_saliency_map(scene_responses, scale_level)
-
-            # Convert to numpy for visualization
-            saliency_np = saliency_map.cpu().numpy()
-
-            # Invert saliency for visualization: high values = good matches
-            saliency_inverted = np.max(saliency_np) - saliency_np
-
-            ax = axes[0, scale_level]
-            im = ax.imshow(saliency_inverted, cmap='hot')
-
-            # Show fixation point for this scale level
-            if scale_level < len(fixations):
-                fix_x, fix_y = fixations[scale_level]
-                ax.plot(fix_x, fix_y, 'wo', markersize=10, markeredgecolor='black',
-                       markeredgewidth=2, label=f'Fixation {scale_level + 1}')
-
-            # Show target location if provided
-            if target_location:
-                ax.plot(target_location[0], target_location[1], 'g*',
-                       markersize=15, label='Target')
-
-            # Create title based on scales used
-            scales_used = self.scales[:scale_level + 1]
-            scale_names = [f'{s:.1f}' for s in scales_used]
-            ax.set_title(f'Fixation {scale_level + 1}\nScales: {", ".join(scale_names)}',
-                        fontsize=12, pad=10)
-            ax.legend(loc='upper right')
-
-            # Add colorbar
-            plt.colorbar(im, ax=ax, shrink=0.8)
-
-        # Bottom row: original image
-        for scale_level in range(n_scales):
-            ax = axes[1, scale_level]
-
-            # Show original image
-            if len(image.shape) == 3:
-                ax.imshow(image, alpha=1)
-            else:
-                ax.imshow(image, cmap='gray', alpha=1)
-
-            # Show fixation point for this scale level
-            if scale_level < len(fixations):
-                fix_x, fix_y = fixations[scale_level]
-                ax.plot(fix_x, fix_y, 'wo', markersize=10, markeredgecolor='black',
-                       markeredgewidth=2, label=f'Fixation {scale_level + 1}')
-
-            # Show target location if provided
-            if target_location:
-                ax.plot(target_location[0], target_location[1], 'g*',
-                       markersize=15, label='Target')
-
-            ax.set_title(f'Saliency Overlay - Fixation {scale_level + 1}',
-                        fontsize=12, pad=10)
-            ax.legend(loc='upper right')
-            ax.axis('off')
-
-        plt.suptitle('Consecutive Saliency Maps: Coarse-to-Fine Progression',
-                     fontsize=16, y=0.95)
-        plt.tight_layout()
-        plt.show()
+        

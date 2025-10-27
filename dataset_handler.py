@@ -99,7 +99,7 @@ class COCODatasetHandler:
             # Get image info and load image
             img_info = self.coco.loadImgs(img_id)[0]
             img_path = os.path.join(self.dataset.root, img_info['file_name'])
-            img = Image.open(img_path).convert('L')
+            img = np.array(Image.open(img_path).convert('L'))
 
             # Process each annotation
             for ann in anns:

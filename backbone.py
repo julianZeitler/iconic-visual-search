@@ -26,7 +26,7 @@ class BaseCNNModel(PyTorchModel):
         super().__init__()
 
         self.outputs = {}
-        self.features: nn.Module
+        self.features: nn.Sequential
 
         if classifier == "linear":
             self.classifier = nn.Linear(embedding_dim, n_classes)
