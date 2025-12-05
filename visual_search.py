@@ -2,6 +2,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 from torchvision import transforms
+from torchvision.models import VGG16_Weights
 import matplotlib.pyplot as plt
 from typing import List, Tuple, Optional
 from gist.layers.gabor_filter_bank import GaborFilterbank
@@ -13,46 +14,28 @@ class VisualSearchModel:
     Uses coarse-to-fine strategy with weighted population averaging.
     """
 
-    def __init__(self, gist: nn.Module, backbone: nn.Module, device: str = "cuda" if torch.cuda.is_available() else "cpu", img_size: Tuple[int,int]=(256, 256)):
+    def __init__(self, backbone: nn.Module, gist: Optional[nn.Module] = None, device: str = "cuda" if torch.cuda.is_available() else "cpu"):
         self.device = torch.device(device)
-        self.gist = gist.to(self.device)
+
+        #TODO: Support Gist (NOT supported right now!)
+        if gist:
+            self.gist = gist.to(self.device)
+        else:
+            self.gist = None
+        
         self.backbone = backbone.to(self.device)
-        self.transform = transforms.Compose([
-            transforms.Resize(img_size)
-        ])
+
         self.target_template = None
-        self.temperature_schedule = [0.01, 0.005, 0.001]
+        self.target_variance = None
+        self.temperature_schedule = [0.1, 0.05, 0.001]
 
     def clear_cache(self):
         """Clear GPU cache to free memory."""
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
-    def _image_to_tensor(self, image: np.ndarray) -> torch.Tensor:
-        """Convert numpy image to PyTorch tensor with proper shape and normalization."""
-        if len(image.shape) == 2:
-            # Grayscale image
-            tensor = torch.from_numpy(image).float().unsqueeze(0).unsqueeze(0)
-        elif len(image.shape) == 3 and image.shape[2] == 1:
-            # Grayscale image with channel dimension
-            tensor = torch.from_numpy(image).float().permute(2, 0, 1).unsqueeze(0)
-        elif len(image.shape) == 3:
-            # RGB image - convert to grayscale
-            if image.shape[2] == 3:
-                # RGB to grayscale conversion
-                gray = 0.299 * image[:, :, 0] + 0.587 * image[:, :, 1] + 0.114 * image[:, :, 2]
-                tensor = torch.from_numpy(gray).float().unsqueeze(0).unsqueeze(0)
-            else:
-                tensor = torch.from_numpy(image).float().unsqueeze(0)
-        else:
-            raise ValueError(f"Unsupported image shape: {image.shape}")
-
-        return tensor.to(self.device)
-
-    def _apply_backbone(self, x, response_layer: Optional[int] = None, batch_norm: bool = True) -> torch.Tensor:
+    def _apply_backbone(self, x: torch.Tensor, response_layer: Optional[int] = None, batch_norm: bool = True) -> torch.Tensor:
         """Apply backbone to image. Output is response of layer with idx 'response_layer'."""
-        if isinstance(x, np.ndarray):
-            x = self._image_to_tensor(x)
 
         # Ensure image has 4 dimensions (B, C, H, W)
         if x.dim() == 2:
@@ -60,7 +43,8 @@ class VisualSearchModel:
         elif x.dim() == 3:
             x = x.unsqueeze(0)  # Add batch dim
 
-        x = self.gist(x)
+        if self.gist:
+            x = self.gist(x)
 
         with torch.no_grad():
             for i, layer in enumerate(self.backbone.features):
@@ -80,54 +64,10 @@ class VisualSearchModel:
                 
                 x = layer(x)
         return x
-    
-    def _get_coordinate_scaling(self, orig_height: int, orig_width: int, feat_height: int, feat_width: int) -> Tuple[float, float]:
+
+    def memorize_target(self, target_image: torch.Tensor, bbox: dict, layer: int = 12):
         """
-        Helper method to compute scaling factors from original image space to feature map space.
-
-        Args:
-            orig_height: Height of original image
-            orig_width: Width of original image
-            feat_height: Height of feature map
-            feat_width: Width of feature map
-
-        Returns:
-            (scale_x, scale_y): Scaling factors to map from original coordinates to feature map coordinates
-        """
-        # Get transformed image dimensions (after self.transform is applied)
-        transform_size = None
-        for t in self.transform.transforms:
-            if isinstance(t, transforms.Resize):
-                if isinstance(t.size, int):
-                    transform_size = (t.size, t.size)
-                else:
-                    transform_size = tuple(t.size)
-                break
-
-        if transform_size is None:
-            # Fallback: assume no resize, use original dimensions
-            transform_height, transform_width = orig_height, orig_width
-        else:
-            transform_height, transform_width = transform_size
-
-        # Calculate scaling factors from original image -> transformed image -> feature map
-        # Scale from original image to transformed image
-        scale_x_to_transform = transform_width / orig_width
-        scale_y_to_transform = transform_height / orig_height
-
-        # Scale from transformed image to feature map
-        scale_x_to_feat = feat_width / transform_width
-        scale_y_to_feat = feat_height / transform_height
-
-        # Combined scaling: original image -> feature map
-        scale_x = scale_x_to_transform * scale_x_to_feat
-        scale_y = scale_y_to_transform * scale_y_to_feat
-
-        return scale_x, scale_y
-
-    def memorize_target(self, target_image: np.ndarray, bbox: dict, layer: int = 12):
-        """
-        Memorize target using bounding box from annotations.
+        Memorize target using bounding box from annotations. Target representation is response in layer at bounding box center.
         bbox: dictionary with keys 'x1', 'y1', 'x2', 'y2' defining the target region
         """
         # Extract target region using bounding box coordinates (in original image space)
@@ -135,7 +75,7 @@ class VisualSearchModel:
         x2, y2 = int(bbox['x2']), int(bbox['y2'])
 
         # Get original image dimensions
-        orig_height, orig_width = target_image.shape[:2]
+        orig_height, orig_width = target_image.shape[-2], target_image.shape[-1]
 
         # Ensure coordinates are within image bounds
         x1 = max(0, min(x1, orig_width - 1))
@@ -146,11 +86,8 @@ class VisualSearchModel:
         # Ensure we have a valid bounding box
         if x2 <= x1 or y2 <= y1:
             raise ValueError(f"Invalid bounding box: x1={x1}, y1={y1}, x2={x2}, y2={y2}")
-        
-        x = self._image_to_tensor(target_image)
-        x = self.transform(x)
 
-        image_responses = self._apply_backbone(x, response_layer=layer, batch_norm=False)
+        image_responses = self._apply_backbone(target_image, response_layer=layer, batch_norm=False)
 
         # Get feature map dimensions (C, H_feat, W_feat)
         shape = image_responses.shape
@@ -158,7 +95,8 @@ class VisualSearchModel:
         feat_width = shape[-1]
 
         # Get scaling factors using helper method
-        scale_x, scale_y = self._get_coordinate_scaling(orig_height, orig_width, feat_height, feat_width)
+        scale_x = feat_width / orig_width
+        scale_y = feat_height / orig_height
 
         # Calculate target center coordinates (x_t, y_t) in original image space
         target_center_x_orig = (x1 + x2) / 2.0
@@ -176,6 +114,7 @@ class VisualSearchModel:
 
         # Extract response vector at target center (x_t, y_t) as in the paper
         self.target_template = image_responses[:, :, target_center_y_feat, target_center_x_feat].squeeze(0)
+        self.target_variance = torch.zeros_like(self.target_template)
 
     def memorize_target_batch(self, image_batch: torch.Tensor, bboxes: List[dict], layer: int = 12):
         """
@@ -254,14 +193,14 @@ class VisualSearchModel:
         """
         Compute saliency map
         """
-        if self.target_template is None:
+        if self.target_template is None or self.target_variance is None:
             raise ValueError("No target template stored. Call memorize_target first.")
 
         # Compute squared differences using broadcasting
-        differences = scene_responses - self.target_template.unsqueeze(0).unsqueeze(-1).unsqueeze(-1)
-
+        differences = scene_responses - self.target_template[None, :, None, None]
+        scaled_differences = differences/(1+self.target_variance[None, :, None, None])
         # Sum squared differences across channels
-        saliency_map = torch.sum(differences ** 2, dim=1)  # (B, H, W)
+        saliency_map = torch.sum(scaled_differences ** 2, dim=1)  # (B, H, W)
 
         # Normalize the saliency map
         saliency_min = torch.min(saliency_map)
@@ -308,20 +247,17 @@ class VisualSearchModel:
 
         return int(round(x_target.item())), int(round(y_target.item()))
 
-    def visual_search(self, image: np.ndarray) -> Tuple[torch.Tensor, torch.Tensor, List[Tuple[int, int]]]:
+    def visual_search(self, image: torch.Tensor, layer: int = 29) -> Tuple[torch.Tensor, torch.Tensor, List[Tuple[int, int]]]:
         """
         Perform coarse-to-fine visual search returning sequence of fixations.
         Returns list of (x, y) fixation points in original image coordinates.
         """
         if self.target_template is None:
             raise ValueError("No target template stored. Call memorize_target first.")
-        
-        x = self._image_to_tensor(image)
-        x = self.transform(x)
 
-        scene_responses = self._apply_backbone(x)
+        scene_responses = self._apply_backbone(image, response_layer=layer)
 
-        orig_height, orig_width = image.shape[:2]
+        orig_height, orig_width = image.shape[-2], image.shape[-1]
 
         fixations = []
         saliency_map = self.compute_saliency_map(scene_responses)  # (B, H, W)
@@ -348,7 +284,7 @@ class VisualSearchModel:
         # Return first batch element (squeeze batch dimension for single image)
         return saliency_map, saliency_map_upsampled, fixations
 
-    def visualize_search(self, image: np.ndarray, saliency_map: torch.Tensor, fixations: List[Tuple[int, int]],
+    def visualize_search(self, image: torch.Tensor, saliency_map: torch.Tensor, fixations: List[Tuple[int, int]],
                         target_location: Optional[Tuple[int, int]] = None):
         """
         Visualize the visual search process.
@@ -359,6 +295,7 @@ class VisualSearchModel:
             fixations: List of (x, y) fixation coordinates
             target_location: Optional ground truth target location (x, y)
         """
+        np_image = image.cpu().numpy().transpose(1, 2, 0)
         # Convert saliency map to numpy for visualization
         if isinstance(saliency_map, torch.Tensor):
             saliency_map_np = saliency_map.cpu().numpy()
@@ -372,9 +309,9 @@ class VisualSearchModel:
 
         # Subplot 1: Original image
         if len(image.shape) == 3:
-            axes[0].imshow(image)
+            axes[0].imshow(np_image)
         else:
-            axes[0].imshow(image, cmap='gray')
+            axes[0].imshow(np_image, cmap='gray')
         axes[0].set_title('Original Image', fontsize=14, fontweight='bold')
         axes[0].axis('off')
 
@@ -387,10 +324,10 @@ class VisualSearchModel:
         cbar.set_label('Saliency', rotation=270, labelpad=15)
 
         # Subplot 3: Image with saliency overlay and fixations
-        if len(image.shape) == 3:
-            axes[2].imshow(image)
+        if len(np_image.shape) == 3:
+            axes[2].imshow(np_image)
         else:
-            axes[2].imshow(image, cmap='gray')
+            axes[2].imshow(np_image, cmap='gray')
 
         # Overlay saliency map with transparency
         axes[2].imshow(saliency_inverted, cmap='hot', alpha=0.4, interpolation='bilinear')

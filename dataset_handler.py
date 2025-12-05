@@ -50,7 +50,8 @@ class COCODatasetHandler:
     def find_instances(self, class_name: str, num_instances: int,
                        min_area: Optional[float] = None,
                        max_area: Optional[float] = None,
-                       shuffle: bool = False) -> List[Dict]:
+                       shuffle: bool = False,
+                       grayscale: bool = True) -> List[Dict]:
         """
         Find a specified number of instances of a given class.
 
@@ -99,7 +100,12 @@ class COCODatasetHandler:
             # Get image info and load image
             img_info = self.coco.loadImgs(img_id)[0]
             img_path = os.path.join(self.dataset.root, img_info['file_name'])
-            img = np.array(Image.open(img_path).convert('L'))
+            if grayscale:
+                img = Image.open(img_path).convert('L')
+            else:
+                img = Image.open(img_path)
+                if img.mode != "RGB":
+                    continue
 
             # Process each annotation
             for ann in anns:
@@ -141,18 +147,18 @@ class COCODatasetHandler:
 
         return instances[:num_instances]
 
-    def load_image(self, image_path: str) -> np.ndarray:
+    def load_image(self, image_path: str, mode = "RGB") -> Image.Image:
         """
         Load image from path and convert to numpy array.
 
         Args:
             image_path: Path to image file
-
+            mode: image format (RGB, L, ...)
         Returns:
             Image as numpy array (RGB format)
         """
-        img = Image.open(image_path).convert('RGB')
-        return np.array(img)
+        img = Image.open(image_path).convert(mode)
+        return img
 
     def get_all_categories(self) -> List[str]:
         """Get list of all available category names."""
