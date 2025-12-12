@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torchvision import models
+from transformers import AutoModel, AutoImageProcessor
 
 from cvtools.models.pytorch import PyTorchModel, L2Norm
 
@@ -212,3 +213,30 @@ class AlexNet(BaseCNNModel):
             self.features.append(L2Norm())
 
         self._register_hooks(output_layers)
+
+
+class ConvNextDino(BaseCNNModel):
+    def __init__(self, n_classes, classifier="linear", output_layers=['features']):
+        # ConvNext Base with DINOv3 outputs 1024-dimensional features
+        super().__init__(embedding_dim=1024, n_classes=n_classes, classifier=classifier)
+
+        # Load pretrained ConvNext Base with DINOv3
+        model_name = "facebook/dinov3-convnext-base-pretrain-lvd1689m"
+        convnext_dino = AutoModel.from_pretrained(model_name)
+
+        # Create feature extraction pipeline
+        self.features = nn.Sequential(
+            *list(convnext_dino.stages), # (1024,7,7)
+            # convnext_dino.layer_norm,
+            convnext_dino.pool # pool to (1024,1)
+        )
+
+        if classifier == "arcface":
+            self.norm = L2Norm()
+        else:
+            self.norm = None
+
+        self._register_hooks(output_layers)
+
+class ViTDino():
+    pass
